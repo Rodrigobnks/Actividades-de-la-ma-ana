@@ -11,6 +11,11 @@ import datetime as _dt
 
 # RUN_RENOMBRAR_MIN.py
 FECHA_DESDE, FECHA_HASTA = "08-06-2026", "14-06-2026"
+SEMANA_SELECCIONADA = 24
+DIA_SELECCIONADO = "Lunes"
+
+RUTA_BASE_DEFAULT = r"C:\Users\EQUIPO\Desktop\Renovaciones"
+RUTA_CONSOLIDADO_DEFAULT = r"C:\Users\EQUIPO\Desktop\Renovaciones\Renovacion"
 
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -26,9 +31,9 @@ import time, os, glob, datetime, shutil, re, traceback
 CHROME_BIN = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 DRIVER_PATH = None
 
-DOWNLOAD_DIR = r"C:\Users\EQUIPO\Desktop\Renovaciones"
-CONSOLIDADO_DIR = r"C:\Users\EQUIPO\Desktop\Renovaciones"
-ANTERIORES_DIR = r"C:\Users\EQUIPO\Desktop\Renovaciones"
+DOWNLOAD_DIR = RUTA_BASE_DEFAULT
+CONSOLIDADO_DIR = RUTA_BASE_DEFAULT
+ANTERIORES_DIR = RUTA_BASE_DEFAULT
 
 DEFAULT_DOWNLOAD_TIMEOUT = 180
 PRESICO_FINAL_TIMEOUT = 600
@@ -39,6 +44,10 @@ def limpiar_carpeta_descargas():
 
     for archivo in glob.glob(os.path.join(DOWNLOAD_DIR, "*")):
         try:
+            # No borrar la carpeta del consolidado.
+            # Las descargas se limpian, pero C:\Users\EQUIPO\Desktop\Renovaciones\Renovacion se conserva.
+            if os.path.isdir(archivo) and os.path.basename(archivo).lower() == "renovacion":
+                continue
             if os.path.isfile(archivo) or os.path.islink(archivo):
                 os.remove(archivo)
             elif os.path.isdir(archivo):
@@ -63,6 +72,116 @@ SITES = [
     {"name": "GUATEMALA", "url": "https://front-guatemala.caprepaprojects.com/login?returnUrl=%2F", "logos": ["CASITA", "PISTIYO", "PRESICO"], "week_selection": "checkbox", "week_checkbox_id": "14-input"},
     {"name": "NICARAGUA", "url": "https://front-nicaragua.caprepaprojects.com/login?returnUrl=%2F", "logos": ["PISTIYO"], "week_selection": "mat_select", "week_option_text": "Semana 14"}
 ]
+
+# ---------- Estado visual de descargas en Streamlit ----------
+ESTADO_DESCARGAS = {}
+ESTADO_DESCARGAS_PLACEHOLDER = None
+
+
+def nombre_marca_visible(logo, site_cfg):
+    """Muestra la marca con el mismo nombre final que se usa al renombrar archivos."""
+    return map_logo(logo, site_cfg)
+
+
+def clave_estado(site_cfg, logo):
+    return (site_cfg.get("name", ""), nombre_marca_visible(logo, site_cfg))
+
+
+def actualizar_estado_descarga(site_cfg, logo, estado, detalle=""):
+    """Actualiza únicamente el tablero visual; no cambia la lógica de Selenium ni de consolidado."""
+    global ESTADO_DESCARGAS, ESTADO_DESCARGAS_PLACEHOLDER
+
+    if not ESTADO_DESCARGAS_PLACEHOLDER:
+        return
+
+    pais, marca = clave_estado(site_cfg, logo)
+    ESTADO_DESCARGAS[(pais, marca)] = {
+        "País": pais,
+        "Marca": marca,
+        "Estado": estado,
+        "Detalle": detalle,
+        "Actualizado": datetime.datetime.now().strftime("%H:%M:%S"),
+    }
+
+    try:
+        df_estado = pd.DataFrame(ESTADO_DESCARGAS.values())
+        orden_estado = {
+            "🔄 EN PROCESO": 0,
+            "⏳ PENDIENTE": 1,
+            "✅ DESCARGADO": 2,
+            "❌ ERROR": 3,
+        }
+        df_estado["_orden"] = df_estado["Estado"].map(orden_estado).fillna(9)
+        df_estado = df_estado.sort_values(["_orden", "País", "Marca"]).drop(columns=["_orden"])
+        ESTADO_DESCARGAS_PLACEHOLDER.dataframe(df_estado, use_container_width=True, hide_index=True)
+    except Exception:
+        pass
+
+
+def inicializar_estado_descargas(accion):
+    """Prepara el menú/tabla de estado según la acción seleccionada."""
+    global ESTADO_DESCARGAS, ESTADO_DESCARGAS_PLACEHOLDER
+
+    ESTADO_DESCARGAS = {}
+
+    if accion not in ("Ejecutar proceso completo", "Solo descargar archivos"):
+        ESTADO_DESCARGAS_PLACEHOLDER = None
+        return None
+
+    contenedor = st.container()
+    with contenedor:
+        st.subheader("Estado de descargas por país y marca")
+        ESTADO_DESCARGAS_PLACEHOLDER = st.empty()
+
+    # Mismo orden de ejecución que ejecutar_descarga_todo(): primero bloque prioritario y luego PRESICO finales.
+    for s in SITES:
+        revisar_pausa()
+        marcas_filtradas = [
+            m for m in s["logos"]
+            if not (
+                (s["name"] == "GUATEMALA" or s["name"] == "PERU")
+                and m == "PRESICO"
+            )
+        ]
+        for logo in marcas_filtradas:
+            actualizar_estado_descarga(s, logo, "⏳ PENDIENTE", "En espera")
+
+    for pais in ["GUATEMALA", "PERU"]:
+        revisar_pausa()
+        cfg = next((s for s in SITES if s["name"] == pais), None)
+        if cfg:
+            actualizar_estado_descarga(cfg, "PRESICO", "⏳ PENDIENTE", "En espera")
+
+    return contenedor
+
+
+# ---------- Control de pausa / reanudar ----------
+def proceso_pausado():
+    try:
+        return bool(st.session_state.get("pausar_proceso_renovaciones", False))
+    except Exception:
+        return False
+
+
+def revisar_pausa():
+    """Pausa el proceso entre pasos sin cambiar la lógica interna de descarga."""
+    try:
+        aviso = st.empty()
+        while st.session_state.get("pausar_proceso_renovaciones", False):
+            aviso.warning("⏸️ Proceso pausado. Presiona Reanudar proceso para continuar.")
+            time.sleep(1)
+        aviso.empty()
+    except Exception:
+        pass
+
+
+def dormir_controlado(segundos):
+    """Respeta los mismos tiempos, pero permite pausar entre intervalos cortos."""
+    fin = time.time() + segundos
+    while time.time() < fin:
+        revisar_pausa()
+        time.sleep(min(0.5, max(0, fin - time.time())))
+
 
 USERNAME, PASSWORD = "rodrigoseas", "Saldaa6103"
 
@@ -266,41 +385,66 @@ def seleccionar_semana(driver, cfg):
                 driver.execute_script("arguments[0].click();", cb)
 
         else:
+            texto_semana = cfg.get("week_option_text", "Semana 14")
+
             try:
-                wait(
+                mat_select = wait(
                     driver,
                     EC.element_to_be_clickable((By.XPATH, "//mat-select[contains(@class,'mat-select')]")),
                     12
-                ).click()
+                )
+                driver.execute_script("arguments[0].scrollIntoView({block:'center'});", mat_select)
+                time.sleep(0.5)
+                try:
+                    mat_select.click()
+                except:
+                    driver.execute_script("arguments[0].click();", mat_select)
             except:
                 driver.execute_script("document.querySelectorAll('mat-select')[0].click();")
 
-            opts = wait(
+            time.sleep(1)
+
+            # Igual que el flujo original: abrir el mat-select y elegir Semana 14.
+            # Se hace clic sobre el mat-option completo, no solo sobre el span,
+            # porque en Angular a veces el span abre visualmente pero no registra la selección.
+            opt = wait(
                 driver,
-                EC.presence_of_all_elements_located(
-                    (By.XPATH, "//mat-option//span[contains(@class,'mat-option-text')]")
+                EC.element_to_be_clickable(
+                    (By.XPATH, f"//mat-option[.//span[contains(@class,'mat-option-text') and normalize-space()='{texto_semana}']]")
                 ),
                 12
             )
 
-            opt14 = next(
-                (o for o in opts if o.text.strip() == cfg.get("week_option_text", "Semana 14")),
-                None
-            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", opt)
+            time.sleep(0.5)
 
-            if opt14:
-                opt14.click()
+            try:
+                opt.click()
+            except:
+                driver.execute_script("arguments[0].click();", opt)
+
+            time.sleep(1)
+
+            # Cierre/confirmación visual del desplegable antes de generar reporte.
+            try:
+                wait(
+                    driver,
+                    EC.invisibility_of_element_located((By.XPATH, "//div[contains(@class,'cdk-overlay-pane')]//mat-option")),
+                    5
+                )
+            except:
+                pass
 
         print("✅ Semana seleccionada")
 
     except Exception as e:
         print("⚠️ Semana:", e)
 
-
 def esperar_descarga(before, ts, timeout):
     start = time.time()
 
     while time.time() - start < timeout:
+        revisar_pausa()
         time.sleep(1)
         cand = newest_file(before, ts)
 
@@ -322,12 +466,15 @@ def generar_reporte(driver, logo, site_cfg):
         timeout_descarga = PRESICO_FINAL_TIMEOUT if es_presico_final(site_cfg, logo) else DEFAULT_DOWNLOAD_TIMEOUT
 
         for intento in range(1, intentos + 1):
+            revisar_pausa()
+            actualizar_estado_descarga(site_cfg, logo, "🔄 EN PROCESO", f"Intento {intento}/{intentos}")
             print(f"\n🔁 Intento {intento}/{intentos} para {logo} en {site_cfg['name']}")
 
             el = try_find(driver, logo, site_cfg)
 
             if not el:
                 print(f"❌ No se encontró logo {logo} en {site_cfg['name']}")
+                actualizar_estado_descarga(site_cfg, logo, "❌ ERROR", "No se encontró logo")
                 return
 
             driver.execute_script("arguments[0].scrollIntoView(true);", el)
@@ -491,6 +638,7 @@ def generar_reporte(driver, logo, site_cfg):
                     continue
 
                 print("❌ Se agotaron los intentos.")
+                actualizar_estado_descarga(site_cfg, logo, "❌ ERROR", "No se generó archivo")
                 return
 
             print("✅ Descarga encontrada:", os.path.basename(newf))
@@ -498,11 +646,13 @@ def generar_reporte(driver, logo, site_cfg):
             renamed = rename_last_and_move(logo, site_cfg, before, ts)
 
             if renamed:
+                actualizar_estado_descarga(site_cfg, logo, "✅ DESCARGADO", os.path.basename(renamed))
                 return
 
         time.sleep(1)
 
     except Exception as e:
+        actualizar_estado_descarga(site_cfg, logo, "❌ ERROR", str(e)[:120])
         print("❌ generar_reporte error:", e)
         traceback.print_exc()
 
@@ -519,6 +669,9 @@ def ejecutar_sitio(site_cfg, marcas_especificas=None):
         driver = create_driver()
 
         if not driver:
+            marcas = marcas_especificas if marcas_especificas else site_cfg["logos"]
+            for logo in marcas:
+                actualizar_estado_descarga(site_cfg, logo, "❌ ERROR", "Falló driver")
             return "❌ FALLÓ DRIVER"
 
         driver.get(site_cfg["url"])
@@ -550,6 +703,7 @@ def ejecutar_sitio(site_cfg, marcas_especificas=None):
         marcas = marcas_especificas if marcas_especificas else site_cfg["logos"]
 
         for logo in marcas:
+            revisar_pausa()
             generar_reporte(driver, logo, site_cfg)
 
             try:
@@ -569,6 +723,11 @@ def ejecutar_sitio(site_cfg, marcas_especificas=None):
         return "✅ ÉXITO"
 
     except Exception as e:
+        marcas = marcas_especificas if marcas_especificas else site_cfg["logos"]
+        for logo in marcas:
+            pais, marca = clave_estado(site_cfg, logo)
+            if ESTADO_DESCARGAS.get((pais, marca), {}).get("Estado") != "✅ DESCARGADO":
+                actualizar_estado_descarga(site_cfg, logo, "❌ ERROR", str(e)[:120])
         print(f"❌ Error en {site_cfg['name']}: {e}")
         return "❌ FALLÓ"
 
@@ -597,10 +756,10 @@ from openpyxl.styles import Font
 # CONFIGURACIÓN
 # ============================================================
 
-CARPETA_ENTRADA = Path(r"C:\Users\EQUIPO\Desktop\Renovaciones")
-CARPETA_SALIDA = Path(r"C:\Users\EQUIPO\Desktop\Renovaciones\Renovacion")
+CARPETA_ENTRADA = Path(RUTA_BASE_DEFAULT)
+CARPETA_SALIDA = Path(RUTA_CONSOLIDADO_DEFAULT)
 
-ARCHIVO_SALIDA = CARPETA_SALIDA / "Renovacion.xlsx"
+ARCHIVO_SALIDA = CARPETA_SALIDA / f"Semana {SEMANA_SELECCIONADA}.xlsx"
 
 
 # ============================================================
@@ -981,6 +1140,72 @@ def aplicar_formato_excel(ruta_excel):
 # PROCESO PRINCIPAL
 # ============================================================
 
+def es_lunes_consolidado():
+    return str(DIA_SELECCIONADO).strip().lower() == "lunes"
+
+
+def guardar_o_anexar_consolidado(df):
+    """
+    Lunes: genera el archivo semanal desde cero.
+    Martes a domingo: abre el archivo semanal existente y pega abajo la nueva información.
+    No cambia la estructura, fórmulas ni formato del consolidado.
+    """
+    CARPETA_SALIDA.mkdir(parents=True, exist_ok=True)
+
+    if es_lunes_consolidado():
+        print(f"Día seleccionado: {DIA_SELECCIONADO}. Se generará el archivo consolidado semanal desde cero.")
+        print("Guardando Excel...")
+
+        with pd.ExcelWriter(
+            ARCHIVO_SALIDA,
+            engine="openpyxl",
+            date_format="mm-dd-yy",
+            datetime_format="mm-dd-yy"
+        ) as writer:
+            df.to_excel(writer, index=False, sheet_name="Renovacion")
+
+        wb = load_workbook(ARCHIVO_SALIDA)
+        ws = wb["Renovacion"]
+
+        ultima_fila = ws.max_row
+        for fila in range(2, ultima_fila + 1):
+            ws[f"U{fila}"] = f'=IF(N{fila}="","Desatendido","Renovado")'
+            ws[f"V{fila}"] = 1
+            ws[f"W{fila}"] = f'=IF(U{fila}="Renovado",1,0)'
+
+        wb.save(ARCHIVO_SALIDA)
+        aplicar_formato_excel(ARCHIVO_SALIDA)
+        return
+
+    print(f"Día seleccionado: {DIA_SELECCIONADO}. Se abrirá el archivo semanal existente y se pegará abajo la nueva información.")
+
+    if not ARCHIVO_SALIDA.exists():
+        raise FileNotFoundError(
+            f"No existe el consolidado semanal para anexar: {ARCHIVO_SALIDA}. "
+            "Para crear el archivo desde cero selecciona Lunes."
+        )
+
+    wb = load_workbook(ARCHIVO_SALIDA)
+    if "Renovacion" not in wb.sheetnames:
+        raise ValueError(f"El archivo {ARCHIVO_SALIDA} no contiene la hoja 'Renovacion'.")
+
+    ws = wb["Renovacion"]
+    fila_inicio = ws.max_row + 1
+    print(f"Pegando {len(df):,} filas nuevas desde la fila {fila_inicio}.")
+
+    for valores in df.itertuples(index=False, name=None):
+        ws.append(list(valores))
+
+    ultima_fila = ws.max_row
+    for fila in range(fila_inicio, ultima_fila + 1):
+        ws[f"U{fila}"] = f'=IF(N{fila}="","Desatendido","Renovado")'
+        ws[f"V{fila}"] = 1
+        ws[f"W{fila}"] = f'=IF(U{fila}="Renovado",1,0)'
+
+    wb.save(ARCHIVO_SALIDA)
+    aplicar_formato_excel(ARCHIVO_SALIDA)
+
+
 def ejecutar_consolidado():
     print("Leyendo archivos desde:")
     print(CARPETA_ENTRADA)
@@ -1171,42 +1396,23 @@ def ejecutar_consolidado():
     # LIMPIAR NULOS ANTES DE EXPORTAR
     # ========================================================
 
+    # Mantiene la lógica igual, pero evita que pandas exporte el texto "nan"
+    # en tipo_desembolso_nuevo. Donde iba "nan", Excel queda en blanco.
+    df["tipo_desembolso_nuevo"] = df["tipo_desembolso_nuevo"].replace(
+        ["nan", "NaN", "None", "NULL", "null", "<NA>"],
+        ""
+    )
+
     df = df.where(pd.notna(df), None)
 
     # ========================================================
-    # GUARDAR EXCEL
+    # GUARDAR O ANEXAR EXCEL SEGÚN EL DÍA SELECCIONADO
     # ========================================================
 
-    print("Guardando Excel...")
-
-    with pd.ExcelWriter(
-        ARCHIVO_SALIDA,
-        engine="openpyxl",
-        date_format="mm-dd-yy",
-        datetime_format="mm-dd-yy"
-    ) as writer:
-        df.to_excel(writer, index=False, sheet_name="Renovacion")
-
-    # ========================================================
-    # AGREGAR FÓRMULAS Y FORMATO
-    # ========================================================
-
-    wb = load_workbook(ARCHIVO_SALIDA)
-    ws = wb["Renovacion"]
-
-    ultima_fila = ws.max_row
-
-    for fila in range(2, ultima_fila + 1):
-        ws[f"U{fila}"] = f'=IF(N{fila}="","Desatendido","Renovado")'
-        ws[f"V{fila}"] = 1
-        ws[f"W{fila}"] = f'=IF(U{fila}="Renovado",1,0)'
-
-    wb.save(ARCHIVO_SALIDA)
-
-    aplicar_formato_excel(ARCHIVO_SALIDA)
+    guardar_o_anexar_consolidado(df)
 
     print("Proceso terminado correctamente.")
-    print(f"Archivo generado en: {ARCHIVO_SALIDA}")
+    print(f"Archivo actualizado en: {ARCHIVO_SALIDA}")
 
 # ============================================================
 # ENVOLTURA STREAMLIT: MENÚ + SEMANA
@@ -1224,24 +1430,42 @@ def calcular_rango_semana(numero_semana: int):
 
 
 def aplicar_semana_a_config(numero_semana: int):
-    """Actualiza solo los valores dinámicos de semana que antes estaban fijos."""
-    global FECHA_DESDE, FECHA_HASTA, SITES
+    """
+    Actualiza únicamente FECHA_DESDE y FECHA_HASTA.
 
+    IMPORTANTE:
+    La selección de semana dentro del portal NO se modifica aquí.
+    Se mantiene exactamente como en el script original:
+    - mat_select: "Semana 14"
+    - checkbox: "14-input"
+
+    Esto conserva las mismas acciones de descarga, botones y selección interna
+    que ya funcionaban en RUN_RENOMBRAR_MIN.py.
+    """
+    global FECHA_DESDE, FECHA_HASTA, SEMANA_SELECCIONADA, ARCHIVO_SALIDA
+
+    SEMANA_SELECCIONADA = int(numero_semana)
     inicio, fin = calcular_rango_semana(numero_semana)
     FECHA_DESDE = inicio.strftime("%d-%m-%Y")
     FECHA_HASTA = fin.strftime("%d-%m-%Y")
-
-    for site in SITES:
-        if site.get("week_selection") == "mat_select":
-            site["week_option_text"] = f"Semana {int(numero_semana)}"
-        elif site.get("week_selection") == "checkbox":
-            site["week_checkbox_id"] = f"{int(numero_semana)}-input"
+    try:
+        ARCHIVO_SALIDA = CARPETA_SALIDA / f"Semana {SEMANA_SELECCIONADA}.xlsx"
+    except Exception:
+        pass
 
     return inicio, fin
 
 
+
+def aplicar_dia_a_config(dia: str):
+    """Actualiza únicamente el comportamiento del consolidado: lunes crea, martes a domingo anexa."""
+    global DIA_SELECCIONADO
+    DIA_SELECCIONADO = str(dia).strip()
+    return DIA_SELECCIONADO
+
+
 def configurar_rutas(carpeta_base: str):
-    """Ajusta rutas para que descarga y consolidado trabajen sobre la misma carpeta."""
+    """Ajusta rutas para descarga y consolidado. Por default usa Desktop/Renovaciones y Desktop/Renovaciones/Renovacion."""
     global DOWNLOAD_DIR, CONSOLIDADO_DIR, ANTERIORES_DIR, PREFS
     global CARPETA_ENTRADA, CARPETA_SALIDA, ARCHIVO_SALIDA
 
@@ -1259,7 +1483,7 @@ def configurar_rutas(carpeta_base: str):
 
     CARPETA_ENTRADA = base
     CARPETA_SALIDA = salida
-    ARCHIVO_SALIDA = salida / "Renovacion.xlsx"
+    ARCHIVO_SALIDA = salida / f"Semana {SEMANA_SELECCIONADA}.xlsx"
 
     return base, salida
 
@@ -1271,6 +1495,7 @@ def ejecutar_descarga_todo():
 
     print("\n>>> INICIANDO BLOQUE PRIORITARIO...")
     for s in SITES:
+        revisar_pausa()
         marcas_filtradas = [
             m for m in s["logos"]
             if not (
@@ -1283,6 +1508,7 @@ def ejecutar_descarga_todo():
 
     print("\n>>> EJECUTANDO MARCAS FINALES...")
     for pais in ["GUATEMALA", "PERU"]:
+        revisar_pausa()
         cfg = next((s for s in SITES if s["name"] == pais), None)
         if cfg:
             ejecutar_sitio(cfg, ["PRESICO"])
@@ -1308,12 +1534,12 @@ def comprimir_csvs(carpeta: Path):
 
 
 def mostrar_descargas(carpeta_base: Path):
-    archivo_excel = carpeta_base / "Renovacion" / "Renovacion.xlsx"
+    archivo_excel = carpeta_base / "Renovacion" / f"Semana {SEMANA_SELECCIONADA}.xlsx"
     if archivo_excel.exists():
         st.download_button(
-            "Descargar consolidado Renovacion.xlsx",
+            f"Descargar consolidado Semana {SEMANA_SELECCIONADA}.xlsx",
             data=archivo_excel.read_bytes(),
-            file_name="Renovacion.xlsx",
+            file_name=f"Semana {SEMANA_SELECCIONADA}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
@@ -1327,8 +1553,8 @@ def mostrar_descargas(carpeta_base: Path):
         )
 
 
-def main_app():
-    st.set_page_config(page_title="Renovaciones LATAM", layout="wide")
+def main_app_renovaciones():
+    st.title("Renovaciones LATAM")
     st.title("Renovaciones LATAM")
 
     st.write("Selecciona qué quieres ejecutar. Siempre se solicita la semana y se calcula el rango tomando como base que la semana 24 es del 08-06-2026 al 14-06-2026.")
@@ -1346,8 +1572,36 @@ def main_app():
     inicio, fin = calcular_rango_semana(int(semana))
     st.info(f"Semana {int(semana)}: {inicio.strftime('%d-%m-%Y')} al {fin.strftime('%d-%m-%Y')}")
 
-    carpeta_default = str((Path.cwd() / "Renovaciones").resolve())
+    dia = st.selectbox(
+        "¿Qué día es?",
+        ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"],
+        index=0,
+    )
+    if dia == "Lunes":
+        st.caption("Lunes: se genera el consolidado semanal desde cero.")
+    else:
+        st.caption(f"{dia}: se abre el archivo de la semana y se pega abajo la nueva información.")
+
+    carpeta_default = RUTA_BASE_DEFAULT
     carpeta_base_txt = st.text_input("Carpeta de trabajo", value=carpeta_default)
+    st.caption(f"Los CSV se guardan en: {carpeta_base_txt} | El consolidado se guarda en: {Path(carpeta_base_txt) / 'Renovacion'}")
+
+    if "pausar_proceso_renovaciones" not in st.session_state:
+        st.session_state["pausar_proceso_renovaciones"] = False
+
+    st.subheader("Control del proceso")
+    col_pausa, col_reanuda = st.columns(2)
+    with col_pausa:
+        if st.button("Pausar proceso"):
+            st.session_state["pausar_proceso_renovaciones"] = True
+    with col_reanuda:
+        if st.button("Reanudar proceso"):
+            st.session_state["pausar_proceso_renovaciones"] = False
+
+    if st.session_state.get("pausar_proceso_renovaciones", False):
+        st.warning("⏸️ Pausa activada. El proceso se detendrá entre pasos y continuará al presionar Reanudar proceso.")
+    else:
+        st.success("▶️ Listo para ejecutar / proceso sin pausa.")
 
     with st.expander("Configuración Selenium", expanded=False):
         global CHROME_BIN, DRIVER_PATH, USERNAME, PASSWORD
@@ -1358,8 +1612,11 @@ def main_app():
         PASSWORD = st.text_input("Contraseña", value=PASSWORD, type="password")
 
     if st.button("Ejecutar", type="primary"):
+        st.session_state["pausar_proceso_renovaciones"] = False
         aplicar_semana_a_config(int(semana))
+        aplicar_dia_a_config(dia)
         carpeta_base, _ = configurar_rutas(carpeta_base_txt)
+        inicializar_estado_descargas(accion)
 
         buffer = io.StringIO()
         ok = True
@@ -1369,8 +1626,10 @@ def main_app():
                 with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
                     print(f"Acción seleccionada: {accion}")
                     print(f"Semana seleccionada: {int(semana)}")
+                    print(f"Día seleccionado: {DIA_SELECCIONADO}")
                     print(f"Rango usado: {FECHA_DESDE} al {FECHA_HASTA}")
                     print(f"Carpeta usada: {carpeta_base}")
+                    print(f"Consolidado de salida: {ARCHIVO_SALIDA}")
 
                     if accion == "Ejecutar proceso completo":
                         ejecutar_proceso_completo()
@@ -1397,6 +1656,372 @@ def main_app():
     else:
         carpeta_base, _ = configurar_rutas(carpeta_base_txt)
         mostrar_descargas(carpeta_base)
+
+
+# ============================================================
+# TABLERO CARTERAS: CONVERTIR EXCEL PRESICO A PARQUET
+# ============================================================
+
+RUTA_DESCARGAS_CARTERAS_DEFAULT = r"C:\Users\EQUIPO\Downloads"
+NOMBRE_EXCEL_PRESICO_DEFAULT = "PRESICO 06-06-2026.xlsx"
+
+
+def extraer_fecha_nombre_presico(nombre_archivo: str):
+    """Extrae la fecha desde nombres tipo PRESICO 07-06-2026.xlsx."""
+    m = re.search(r"PRESICO\s+(\d{2})-(\d{2})-(\d{4})\.xlsx$", str(nombre_archivo), flags=re.IGNORECASE)
+    if not m:
+        return None
+    dia, mes, anio = map(int, m.groups())
+    return _dt.date(anio, mes, dia)
+
+
+def nombre_presico_por_fecha(fecha: _dt.date, extension: str):
+    return f"PRESICO {fecha.strftime('%d-%m-%Y')}{extension}"
+
+
+def preparar_df_cartera_para_parquet(ruta_excel: Path, fecha_corte_forzada=None, status_callback=None):
+    """
+    Replica la lógica original de conversión a parquet:
+    - lee el Excel
+    - elimina ruta con ZONA DE PRUEBAS-
+    - convierte Localidad y objetos a texto
+    - opcionalmente cambia la columna Corte a una fecha específica
+    """
+    if status_callback:
+        status_callback(f"Leyendo Excel: {ruta_excel.name}")
+
+    print(f"Leyendo Excel: {ruta_excel}")
+    df = pd.read_excel(ruta_excel)
+
+    total_inicial = len(df)
+    columnas_iniciales = len(df.columns)
+    conteo_eliminadas = 0
+
+    print(f"Filas totales cargadas: {total_inicial}")
+    print(f"Columnas totales cargadas: {columnas_iniciales}")
+
+    if status_callback:
+        status_callback("Revisando y eliminando filas de ZONA DE PRUEBAS-")
+
+    if 'ruta' in df.columns:
+        filas_a_eliminar = df['ruta'].astype(str).str.contains('ZONA DE PRUEBAS-', na=False)
+        conteo_eliminadas = int(filas_a_eliminar.sum())
+
+        if conteo_eliminadas > 0:
+            df = df[~filas_a_eliminar].copy()
+            print(f"🔍 Se eliminaron {conteo_eliminadas} filas de 'ZONA DE PRUEBAS-'.")
+        else:
+            print("✅ No se encontraron filas de prueba.")
+    else:
+        print("⚠️ Advertencia: Columna 'ruta' no encontrada.")
+
+    if fecha_corte_forzada is not None:
+        if status_callback:
+            status_callback(f"Actualizando columna Corte a {fecha_corte_forzada.strftime('%d/%m/%Y')}")
+
+        if 'Corte' in df.columns:
+            df['Corte'] = pd.Timestamp(fecha_corte_forzada)
+            print(f"✅ Columna Corte actualizada a: {fecha_corte_forzada.strftime('%d/%m/%Y')}")
+        else:
+            print("⚠️ Advertencia: Columna 'Corte' no encontrada. No se cambió fecha de corte.")
+
+    if status_callback:
+        status_callback("Ajustando tipos de datos antes de guardar el parquet")
+
+    if 'Localidad' in df.columns:
+        df['Localidad'] = df['Localidad'].astype(str)
+
+    for col in df.select_dtypes(include=['object']).columns:
+        df[col] = df[col].astype(str)
+
+    columnas_finales = len(df.columns)
+
+    print(f"Filas finales: {len(df)}")
+    print(f"Columnas finales: {columnas_finales}")
+
+    info = {
+        "filas_iniciales": int(total_inicial),
+        "filas_finales": int(len(df)),
+        "filas_eliminadas_prueba": int(conteo_eliminadas),
+        "columnas_iniciales": int(columnas_iniciales),
+        "columnas_finales": int(columnas_finales),
+        "mantiene_eliminacion_zona_pruebas": True,
+    }
+
+    return df, info
+
+
+def guardar_parquet_cartera(df: pd.DataFrame, ruta_salida: Path, status_callback=None):
+    ruta_salida.parent.mkdir(parents=True, exist_ok=True)
+
+    if status_callback:
+        status_callback(f"Guardando parquet: {ruta_salida.name}")
+
+    print(f"🚀 Guardando archivo Parquet: {ruta_salida}")
+    df.to_parquet(ruta_salida, engine='pyarrow', index=False)
+    print(f"✅ Proceso completado. Guardado en: {ruta_salida}")
+
+
+def _resultado_parquet(nombre: str, ruta_salida: Path, df: pd.DataFrame, info: dict):
+    resultado = dict(info)
+    resultado.update({
+        "nombre": nombre,
+        "ruta": str(ruta_salida),
+        "archivo": ruta_salida.name,
+        "preview": df.iloc[:5, :2].copy(),
+    })
+    return resultado
+
+
+def convertir_excel_a_parquet_carteras(ruta_excel_presico: str, dia: str, status_callback=None):
+    """
+    Lunes:
+    - crea un parquet con el archivo original y el nombre del domingo.
+    - crea otro parquet con Corte cambiado al sábado anterior y nombre del sábado.
+
+    Martes a domingo:
+    - crea solo un parquet con el mismo nombre/fecha del Excel.
+    """
+    ruta_excel = Path(ruta_excel_presico)
+    print("\n--- [INICIO] TAREA: CONVERSIÓN CARTERA A PARQUET ---")
+
+    if status_callback:
+        status_callback("Validando que exista el archivo Excel seleccionado")
+
+    if not ruta_excel.exists():
+        print(f"❌ Error: No existe el archivo {ruta_excel}")
+        return []
+
+    fecha_archivo = extraer_fecha_nombre_presico(ruta_excel.name)
+    if fecha_archivo is None:
+        print("⚠️ No se pudo extraer fecha del nombre. Se generará parquet con el mismo nombre del Excel.")
+        df, info = preparar_df_cartera_para_parquet(ruta_excel, status_callback=status_callback)
+        salida = ruta_excel.with_suffix('.parquet')
+        guardar_parquet_cartera(df, salida, status_callback=status_callback)
+        return [_resultado_parquet("Parquet generado", salida, df, info)]
+
+    dia_normalizado = str(dia).strip().lower()
+    resultados = []
+
+    if dia_normalizado == "lunes":
+        print("Día seleccionado: Lunes")
+        print("Se generarán dos parquet: domingo sin modificar y sábado con Corte ajustado.")
+
+        if status_callback:
+            status_callback("Generando parquet del domingo sin modificar")
+
+        # 1) Parquet del domingo sin cambiar Corte.
+        df_domingo, info_domingo = preparar_df_cartera_para_parquet(ruta_excel, status_callback=status_callback)
+        salida_domingo = ruta_excel.parent / nombre_presico_por_fecha(fecha_archivo, ".parquet")
+        guardar_parquet_cartera(df_domingo, salida_domingo, status_callback=status_callback)
+        resultados.append(_resultado_parquet("Domingo sin modificar", salida_domingo, df_domingo, info_domingo))
+
+        if status_callback:
+            status_callback("Generando parquet del sábado anterior con Corte ajustado")
+
+        # 2) Parquet del sábado anterior, cambiando Corte.
+        fecha_sabado = fecha_archivo - _dt.timedelta(days=1)
+        df_sabado, info_sabado = preparar_df_cartera_para_parquet(ruta_excel, fecha_corte_forzada=fecha_sabado, status_callback=status_callback)
+        salida_sabado = ruta_excel.parent / nombre_presico_por_fecha(fecha_sabado, ".parquet")
+        guardar_parquet_cartera(df_sabado, salida_sabado, status_callback=status_callback)
+        resultados.append(_resultado_parquet("Sábado con Corte ajustado", salida_sabado, df_sabado, info_sabado))
+
+    else:
+        print(f"Día seleccionado: {dia}")
+        print("Se generará un parquet con el mismo nombre/fecha del Excel.")
+
+        if status_callback:
+            status_callback(f"Generando parquet de {dia} con el mismo nombre/fecha del Excel")
+
+        df, info = preparar_df_cartera_para_parquet(ruta_excel, status_callback=status_callback)
+        salida = ruta_excel.parent / nombre_presico_por_fecha(fecha_archivo, ".parquet")
+        guardar_parquet_cartera(df, salida, status_callback=status_callback)
+        resultados.append(_resultado_parquet("Parquet generado", salida, df, info))
+
+    if status_callback:
+        status_callback("Proceso de parquet terminado")
+
+    print("\n🏁 Tarea de parquet finalizada.")
+    return resultados
+
+
+def _leer_preview_parquet_seguro(ruta: Path, filas: int = 5, columnas: int = 2):
+    """Lee solo las primeras columnas y primeras filas del parquet para que la vista previa sea ligera."""
+    try:
+        if not ruta.exists():
+            return None, f"No encontré el archivo generado en: {ruta}"
+
+        # Primero leemos únicamente la metadata para tomar solo las primeras columnas.
+        # Esto evita cargar las 46 columnas completas solo para la vista previa.
+        try:
+            import pyarrow.parquet as pq
+            pf = pq.ParquetFile(str(ruta))
+            columnas_disponibles = pf.schema.names
+            columnas_preview = columnas_disponibles[:columnas]
+            if not columnas_preview:
+                return None, "El parquet no tiene columnas disponibles para vista previa."
+            df_preview = pd.read_parquet(ruta, columns=columnas_preview).head(filas)
+        except Exception:
+            # Respaldo si pyarrow no permite leer metadata: carga normal, pero recorta de inmediato.
+            df_preview = pd.read_parquet(ruta).iloc[:filas, :columnas]
+
+        # Para evitar problemas de renderizado por tipos mixtos, fechas o nulos,
+        # solo la vista previa se convierte a texto. El parquet queda intacto.
+        df_preview = df_preview.copy()
+        for col in df_preview.columns:
+            df_preview[col] = df_preview[col].apply(lambda x: "" if pd.isna(x) else str(x))
+
+        return df_preview, None
+    except Exception as e:
+        return None, str(e)
+
+
+def mostrar_resultados_parquet(resultados):
+    if not resultados:
+        return
+
+    st.subheader("Vista previa de archivos generados")
+    st.info("Se mantiene la eliminación de filas donde la columna ruta contiene 'ZONA DE PRUEBAS-'.")
+
+    for idx, resultado in enumerate(resultados):
+        ruta = Path(resultado.get("ruta", ""))
+
+        with st.container(border=True):
+            st.markdown(f"**{resultado.get('nombre', 'Parquet')}**")
+            st.caption(resultado.get("archivo", ruta.name))
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Filas iniciales", f"{resultado.get('filas_iniciales', 0):,}")
+            m2.metric("Filas eliminadas", f"{resultado.get('filas_eliminadas_prueba', 0):,}")
+            m3.metric("Filas finales", f"{resultado.get('filas_finales', 0):,}")
+
+            c1, c2 = st.columns(2)
+            c1.metric("Columnas iniciales", f"{resultado.get('columnas_iniciales', 0):,}")
+            c2.metric("Columnas finales", f"{resultado.get('columnas_finales', 0):,}")
+
+            st.markdown("**Vista previa ligera**")
+
+            preview, error_preview = _leer_preview_parquet_seguro(ruta, filas=5, columnas=2)
+
+            if preview is not None and not preview.empty:
+                st.caption("Mostrando solo las primeras 2 columnas y las primeras 5 filas para que cargue rápido.")
+                st.table(preview)
+            elif error_preview:
+                st.warning(f"No se pudo cargar la vista previa de {ruta.name}: {error_preview}")
+            else:
+                st.warning("La vista previa no tiene filas para mostrar, pero el archivo se generó correctamente.")
+
+            if ruta.exists():
+                st.download_button(
+                    f"Descargar {ruta.name}",
+                    data=ruta.read_bytes(),
+                    file_name=ruta.name,
+                    mime="application/octet-stream",
+                    key=f"download_parquet_{idx}_{ruta.name}",
+                )
+            else:
+                st.warning(f"No encontré el archivo para descargar: {ruta}")
+
+def archivos_excel_presico_en_descargas(carpeta_descargas: Path):
+    if not carpeta_descargas.exists():
+        return []
+    return sorted(carpeta_descargas.glob("PRESICO *.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def main_app_carteras():
+    st.title("Carteras")
+    st.write("Convierte el Excel de PRESICO a Parquet. El flujo LATAM/OneDrive no se agregó.")
+
+    carpeta_descargas_txt = st.text_input("Carpeta de descargas", value=RUTA_DESCARGAS_CARTERAS_DEFAULT)
+    carpeta_descargas = Path(carpeta_descargas_txt).expanduser().resolve()
+
+    archivos = archivos_excel_presico_en_descargas(carpeta_descargas)
+    nombres_archivos = [p.name for p in archivos]
+
+    default_path = carpeta_descargas / NOMBRE_EXCEL_PRESICO_DEFAULT
+
+    if nombres_archivos:
+        opciones = nombres_archivos.copy()
+        if NOMBRE_EXCEL_PRESICO_DEFAULT not in opciones:
+            opciones.insert(0, NOMBRE_EXCEL_PRESICO_DEFAULT)
+        index_default = opciones.index(NOMBRE_EXCEL_PRESICO_DEFAULT) if NOMBRE_EXCEL_PRESICO_DEFAULT in opciones else 0
+        nombre_seleccionado = st.selectbox("Archivo PRESICO a buscar en descargas", opciones, index=index_default)
+        ruta_excel_txt = str(carpeta_descargas / nombre_seleccionado)
+    else:
+        st.warning("No encontré archivos 'PRESICO *.xlsx' en la carpeta. Puedes dejar o escribir el nombre esperado.")
+        nombre_seleccionado = st.text_input("Nombre del archivo PRESICO", value=NOMBRE_EXCEL_PRESICO_DEFAULT)
+        ruta_excel_txt = str(carpeta_descargas / nombre_seleccionado)
+
+    ruta_excel_txt = st.text_input("Ruta completa del Excel", value=ruta_excel_txt)
+
+    dia = st.selectbox(
+        "¿Qué día es?",
+        ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"],
+        index=0,
+        key="dia_carteras",
+    )
+
+    if dia == "Lunes":
+        st.caption("Lunes: genera el parquet del domingo sin modificar y otro del sábado anterior cambiando la columna Corte.")
+    else:
+        st.caption(f"{dia}: genera un parquet con el mismo nombre/fecha del Excel seleccionado.")
+
+    if "carteras_resultados_parquet" not in st.session_state:
+        st.session_state["carteras_resultados_parquet"] = []
+    if "carteras_log_parquet" not in st.session_state:
+        st.session_state["carteras_log_parquet"] = ""
+
+    if st.button("Ejecutar Carteras", type="primary"):
+        buffer = io.StringIO()
+        resultados = []
+        ok = True
+        estado_box = st.empty()
+
+        def actualizar_estado(mensaje):
+            estado_box.info(f"🔄 {mensaje}")
+
+        with st.spinner("Procesando cartera..."):
+            try:
+                with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
+                    resultados = convertir_excel_a_parquet_carteras(
+                        ruta_excel_txt,
+                        dia,
+                        status_callback=actualizar_estado,
+                    )
+            except Exception as e:
+                ok = False
+                print(f"\n❌ Error general en Carteras: {e}")
+                traceback.print_exc(file=buffer)
+
+        st.session_state["carteras_resultados_parquet"] = resultados
+        st.session_state["carteras_log_parquet"] = buffer.getvalue()
+
+        if ok:
+            estado_box.success("✅ Proceso de parquet terminado")
+            st.success("Proceso de Carteras terminado.")
+        else:
+            estado_box.error("❌ El proceso de parquet terminó con error")
+            st.error("El proceso de Carteras terminó con error. Revisa el log.")
+
+    # El log técnico de Carteras se conserva internamente, pero ya no se muestra en pantalla
+    # para dejar limpia la vista de resultados.
+    mostrar_resultados_parquet(st.session_state.get("carteras_resultados_parquet", []))
+
+
+def main_app():
+    st.set_page_config(page_title="Gestor de Reportes PRESICO", layout="wide")
+
+    st.sidebar.title("Gestor de Reportes PRESICO")
+    tablero = st.sidebar.radio(
+        "¿Qué tablero quieres abrir?",
+        ["Carteras", "Renovaciones"],
+        index=0,
+    )
+
+    if tablero == "Carteras":
+        main_app_carteras()
+    else:
+        main_app_renovaciones()
 
 
 if __name__ == "__main__":
